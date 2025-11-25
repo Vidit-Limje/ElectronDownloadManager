@@ -1,11 +1,20 @@
 {
   "manifest_version": 3,
-  "name": "Custom Download Redirector",
+  "name": "Electron Download Sender",
   "version": "1.0",
-  "description": "Intercept downloads and send them to Electron Download Manager",
-  "permissions": ["downloads", "scripting"],
+  "description": "Send downloads to Electron Download Manager",
+  "permissions": [
+    "downloads",
+    "notifications",
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*"
+  ],
   "background": {
     "service_worker": "background.js"
   },
-  "host_permissions": ["<all_urls>"]
+  "action": {
+    "default_title": "Send to Electron Downloader"
+  }
 }
