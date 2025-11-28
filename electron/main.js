@@ -3,6 +3,10 @@ import path from "path";
 import fs from "fs";
 import https from "https";
 import http from "http";
+import { fileURLToPath } from "url";
+import { addHistoryEntry } from "./history.js";
+import { rebuildHashDatabaseFromFolder } from "./hasher.js";
+import { Worker } from "worker_threads";
 
 import {
   computePartialSHA256,
@@ -16,17 +20,22 @@ let mainWindow;
 const PENDING = new Map(); // dupId -> { item, checkedPartial, savePath }
 const PRE_DECISIONS = new Map(); // dupId -> { url, filename } for URL-initiated duplicates
 const NEXT_SAVE_PATH = new Map(); // filename -> forced savePath to use in will-download
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+console.log("🧩 Using preload:", path.join(__dirname, "preload.js"));
+console.log("🧩 File exists:", fs.existsSync(path.join(__dirname, "preload.js")));
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 900,
-    height: 700,
-    webPreferences: {
-      preload: path.join(app.getAppPath(), "electron", "preload.js"),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  });
+  width: 900,
+  height: 700,
+  webPreferences: {
+    preload: path.join(__dirname, "preload.js"),   // ✅ FIXED
+    contextIsolation: true,
+    nodeIntegration: false,
+  },
+});
+
 
   mainWindow.loadURL("http://localhost:5173");
   console.log("✅ UI Loaded");
@@ -70,6 +79,32 @@ function startExtensionListener() {
 app.whenReady().then(() => {
   startExtensionListener();
   createWindow();
+  
+  ipcMain.handle("rebuild-hash-db", async () => {
+  return new Promise((resolve) => {
+    const folder = path.join(app.getPath("downloads"), "electron");
+    const worker = new Worker(path.join(__dirname, "hashWorker.js"));
+
+    worker.postMessage(folder);
+
+    worker.on("message", (msg) => {
+      if (msg.type === "progress") {
+        mainWindow?.webContents.send("hash-progress", msg);
+      }
+
+      if (msg.type === "done") {
+        saveDB(msg.db);
+        resolve({ ok: true, count: Object.keys(msg.db).length });
+      }
+    });
+
+    worker.on("error", (err) => {
+      console.error("Worker crashed:", err);
+      resolve({ ok: false, error: err.message });
+    });
+  });
+});
+
 
   ipcMain.on("download", async (_, url) => {
     if (url) await handleDownload(url);
@@ -236,29 +271,29 @@ app.whenReady().then(() => {
 
     /* ---- Finalization ---- */
     item.once("done", async (_, stateStr) => {
-      if (stateStr === "completed") {
-        console.log(`🏁 Completed: ${item.getSavePath()}`);
+  if (stateStr === "completed") {
+    console.log(`🏁 Completed: ${item.getSavePath()}`);
 
-        mainWindow?.webContents.send("download-done", {
-          filePath: item.getSavePath(),
-          name: filename,
-        });
-
-        try {
-          await registerFileHashes(item.getSavePath());
-          console.log(`🔐 Hashes saved for: ${filename}`);
-        } catch (err) {
-          console.error("Failed to register hashes:", err);
-        }
-      } else {
-        console.log(`❌ Download failed: ${stateStr}`);
-        mainWindow?.webContents.send("download-error", { state: stateStr });
-      }
-
-      for (const [k, v] of PENDING.entries()) {
-        if (v.item === item) PENDING.delete(k);
-      }
+    mainWindow?.webContents.send("download-done", {
+      filePath: item.getSavePath(),
+      name: filename,
     });
+
+    try {
+      await registerFileHashes(item.getSavePath());
+      console.log(`🔐 Hashes saved for: ${filename}`);
+    } catch (err) {
+      console.error("Failed to register hashes:", err);
+    }
+  } else {
+    console.log(`❌ Download failed: ${stateStr}`);
+    mainWindow?.webContents.send("download-error", { state: stateStr });
+  }
+
+  for (const [k, v] of PENDING.entries()) {
+    if (v.item === item) PENDING.delete(k);
+  }
+  });
   });
 });
 

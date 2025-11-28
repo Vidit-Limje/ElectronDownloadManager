@@ -200,6 +200,48 @@ export async function checkHashExists(
   return { exists: false };
 }
 
+/* ---------------------- REBUILD HASH DATABASE ---------------------- */
+export async function rebuildHashDatabaseFromFolder(folderPath) {
+  const newDB = {};
+
+  if (!fs.existsSync(folderPath)) {
+    saveDB(newDB);
+    return newDB;
+  }
+
+  const files = fs.readdirSync(folderPath);
+
+  for (const filename of files) {
+    const filePath = path.join(folderPath, filename);
+
+    if (!fs.statSync(filePath).isFile()) continue;
+
+    console.log("🔍 Hashing:", filePath);
+
+    // ===== Yield back to event loop to prevent freezing =====
+    await new Promise((res) => setTimeout(res, 10));
+
+    const partial = await computePartialSHA256(filePath);
+    const sha256 = await computeSHA256(filePath);
+    const ssdeepHash = computeSsdeep(filePath);
+    const sdhashHash = await computeSdhash(filePath);
+    const tlshHash = await computeTLSH(filePath);
+
+    newDB[sha256] = {
+      path: filePath,
+      partial,
+      ssdeep: ssdeepHash,
+      sdhash: sdhashHash,
+      tlsh: tlshHash,
+    };
+  }
+
+  saveDB(newDB);
+  return newDB;
+}
+
+
+
 /* ---------------------- REGISTER FILE ---------------------- */
 export async function registerFileHashes(filePath) {
   if (!filePath || !fs.existsSync(filePath)) return;
@@ -238,8 +280,9 @@ export default {
   computeSdhash,
   computeTLSH,
   compareSsdeep,
-  compareSdhash,
+  compareSdhash,  
   compareTLSH,
   checkHashExists,
   registerFileHashes,
+  rebuildHashDatabaseFromFolder,
 };

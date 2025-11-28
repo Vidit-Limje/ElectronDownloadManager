@@ -20,6 +20,7 @@
   "dependencies": {
     "cross-env": "^10.1.0",
     "crypto-js": "^4.2.0",
+    "framer-motion": "^12.23.24",
     "fs": "^0.0.1-security",
     "http": "^0.0.1-security",
     "https": "^1.0.0",
