@@ -6,8 +6,12 @@ export default function App() {
   const [progress, setProgress] = useState(0);
   const [dupModal, setDupModal] = useState(null);
 
-  const [activeTab, setActiveTab] = useState("download"); // "download" | "history"
+  const [activeTab, setActiveTab] = useState("download");
   const [history, setHistory] = useState([]);
+
+  // >>> NEW
+  const [currentDupId, setCurrentDupId] = useState(null);
+  const [isPaused, setIsPaused] = useState(false);
 
   /* -------------------------------------------------- */
   /*  IPC LISTENERS                                     */
@@ -16,27 +20,32 @@ export default function App() {
     const unsubProgress = window.dm?.onProgress((p) => {
       setProgress(Number(p.percent));
       setStatus(`Downloading ${p.name} – ${Number(p.percent).toFixed(2)}%`);
+      setCurrentDupId(p.dupId || null); // >>> NEW
     });
 
     const unsubDone = window.dm?.onDone((d) => {
       setStatus(`✔ Download complete: ${d.name}`);
       setProgress(0);
+      setCurrentDupId(null); // >>> NEW
+      setIsPaused(false); // >>> NEW
     });
 
     const unsubError = window.dm?.onError(() => {
       setStatus(`❌ Download error`);
       setProgress(0);
+      setCurrentDupId(null); // >>> NEW
+      setIsPaused(false);
     });
 
     const unsubDup = window.dm?.onDuplicate((data) => {
       setDupModal(data);
+      setCurrentDupId(data.dupId || null); // >>> NEW
     });
 
     const unsubHistory = window.dm?.onHistory((list) => {
       setHistory(list);
     });
 
-    // load initial history
     window.dm?.getHistory().then((list) => setHistory(list || []));
 
     return () => {
@@ -73,12 +82,35 @@ export default function App() {
     if (action === "rename") setStatus("Saving file as new...");
   };
 
+  // >>> NEW: Pause / Resume / Cancel controls
+  const pauseDownload = () => {
+    if (!currentDupId) return;
+    window.dm.pause(currentDupId);
+    setIsPaused(true);
+    setStatus("⏸ Download paused");
+  };
+
+  const resumeDownload = () => {
+    if (!currentDupId) return;
+    window.dm.resume(currentDupId);
+    setIsPaused(false);
+    setStatus("▶ Download resumed");
+  };
+
+  const cancelDownload = () => {
+    if (!currentDupId) return;
+    window.dm.cancel(currentDupId);
+    setIsPaused(false);
+    setStatus("❌ Download cancelled");
+    setProgress(0);
+  };
+
   /* -------------------------------------------------- */
   /*  RENDER                                            */
   /* -------------------------------------------------- */
   return (
     <div style={layout}>
-      {/* ---------------- LEFT SIDEBAR ---------------- */}
+      {/* LEFT SIDEBAR */}
       <div style={sidebar}>
         <div
           style={tab(activeTab === "download")}
@@ -95,7 +127,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* ---------------- MAIN CONTENT ---------------- */}
+      {/* MAIN CONTENT */}
       <div style={content}>
         {activeTab === "download" && (
           <DownloadUI
@@ -104,13 +136,17 @@ export default function App() {
             startDownload={startDownload}
             status={status}
             progress={progress}
+            dupId={currentDupId}        // >>> NEW
+            isPaused={isPaused}         // >>> NEW
+            pause={pauseDownload}       // >>> NEW
+            resume={resumeDownload}     // >>> NEW
+            cancel={cancelDownload}     // >>> NEW
           />
         )}
 
         {activeTab === "history" && <HistoryUI history={history} />}
       </div>
 
-      {/* ---------------- DUPLICATE MODAL ---------------- */}
       {dupModal && (
         <DuplicateModal dupModal={dupModal} sendDecision={sendDecision} />
       )}
@@ -122,12 +158,11 @@ export default function App() {
 /*  DOWNLOAD PAGE UI                                          */
 /* ---------------------------------------------------------- */
 
-function DownloadUI({ url, setUrl, startDownload, status, progress }) {
+function DownloadUI({ url, setUrl, startDownload, status, progress, dupId, isPaused, pause, resume, cancel }) {
   return (
     <div style={card}>
       <h1 style={title}>⚡ Smart Duplicate-Aware Downloader</h1>
 
-      {/* URL Input */}
       <div style={inputRow}>
         <input
           style={input}
@@ -140,26 +175,43 @@ function DownloadUI({ url, setUrl, startDownload, status, progress }) {
         </button>
       </div>
 
-      {/* Status */}
       {status && <div style={statusBox}>{status}</div>}
 
-      {/* Progress */}
       {progress > 0 && (
-        <div style={{ marginTop: 10 }}>
-          <div style={progressOuter}>
-            <div style={{ ...progressInner, width: `${progress}%` }} />
+        <>
+          <div style={{ marginTop: 10 }}>
+            <div style={progressOuter}>
+              <div style={{ ...progressInner, width: `${progress}%` }} />
+            </div>
+            <div style={{ fontSize: 13, opacity: 0.7 }}>
+              {progress.toFixed(2)}%
+            </div>
           </div>
-          <div style={{ fontSize: 13, opacity: 0.7 }}>
-            {progress.toFixed(2)}%
+
+          {/* >>> NEW: Pause/Resume/Cancel buttons */}
+          <div style={{ marginTop: 12, display: "flex", gap: 10 }}>
+            {!isPaused && (
+              <button style={btnOrange} onClick={pause}>
+                ⏸ Pause
+              </button>
+            )}
+            {isPaused && (
+              <button style={btnBlue} onClick={resume}>
+                ▶ Resume
+              </button>
+            )}
+            <button style={btnRed} onClick={cancel}>
+              ❌ Cancel
+            </button>
           </div>
-        </div>
+        </>
       )}
     </div>
   );
 }
 
 /* ---------------------------------------------------------- */
-/*  HISTORY PAGE UI                                           */
+/*  HISTORY + MODAL (unchanged)                              */
 /* ---------------------------------------------------------- */
 
 function HistoryUI({ history }) {
@@ -187,7 +239,7 @@ function HistoryUI({ history }) {
 }
 
 /* ---------------------------------------------------------- */
-/*  DUPLICATE MODAL                                           */
+/*  DUPLICATE MODAL (unchanged)                              */
 /* ---------------------------------------------------------- */
 
 function DuplicateModal({ dupModal, sendDecision }) {
@@ -199,11 +251,7 @@ function DuplicateModal({ dupModal, sendDecision }) {
         </h2>
 
         <p>
-          A file matching{" "}
-          <b>
-            {dupModal.name}
-          </b>{" "}
-          already exists.
+          A file matching <b>{dupModal.name}</b> already exists.
         </p>
 
         <p style={{ opacity: 0.8 }}>
@@ -235,7 +283,7 @@ function DuplicateModal({ dupModal, sendDecision }) {
 }
 
 /* ---------------------------------------------------------- */
-/*  STYLES (MODERN DESIGN)                                   */
+/*  STYLES (unchanged)                                        */
 /* ---------------------------------------------------------- */
 
 const layout = {

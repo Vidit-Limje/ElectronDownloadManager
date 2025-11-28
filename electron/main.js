@@ -49,12 +49,10 @@ function addHistoryEntry(name, filePath) {
 
   saveHistory(list);
 
-  // Notify frontend
   if (mainWindow) {
     mainWindow.webContents.send("history-updated", list);
   }
 }
-// ------------------------------------
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -117,8 +115,9 @@ app.whenReady().then(() => {
   startExtensionListener();
   createWindow();
   setupIPCDownloadTrigger();
-  setupHistoryHandlers();      // <-- ADDED
+  setupHistoryHandlers();
   setupDownloadManager();
+  setupPauseCancelHandlers();   // 🔥 ADDED
 });
 
 /* ------------------------------------------------------- */
@@ -127,6 +126,48 @@ app.whenReady().then(() => {
 function setupHistoryHandlers() {
   ipcMain.handle("get-history", async () => {
     return loadHistory();
+  });
+}
+
+/* ------------------------------------------------------- */
+/* PAUSE + CANCEL HANDLERS                                  */
+/* ------------------------------------------------------- */
+function setupPauseCancelHandlers() {
+  
+  ipcMain.on("pause-download", (_, dupId) => {
+    const entry = PENDING.get(dupId);
+    if (entry?.item && !entry.item.isPaused()) {
+      entry.item.pause();
+      console.log("⏸ Paused:", dupId);
+    }
+  });
+
+  ipcMain.on("resume-download", (_, dupId) => {
+    const entry = PENDING.get(dupId);
+    if (entry?.item && entry.item.isPaused()) {
+      entry.item.resume();
+      console.log("▶ Resumed:", dupId);
+    }
+  });
+
+  ipcMain.on("cancel-download", (_, dupId) => {
+    const entry = PENDING.get(dupId);
+    if (entry?.item) {
+      entry.item.cancel();
+      console.log("❌ Cancelled:", dupId);
+
+      try {
+        fs.unlinkSync(entry.savePath); // remove partial file
+      } catch {}
+
+      PENDING.delete(dupId);
+      NEXT_SAVE_PATH.delete(dupId);
+
+      mainWindow?.webContents.send("download-error", {
+        dupId,
+        state: "cancelled",
+      });
+    }
   });
 }
 
@@ -153,7 +194,6 @@ function setupDownloadManager() {
 
     if (!savePath) savePath = originalPath;
 
-    // block only original name duplicates
     if (savePath === originalPath && fs.existsSync(originalPath)) {
       console.log("🚫 Filename duplicate:", originalPath);
 
@@ -178,7 +218,7 @@ function setupDownloadManager() {
 
     /* --------------------------------------------------- */
     /* PROGRESS                                            */
-    /* --------------------------------------------------- */
+/* --------------------------------------------------- */
     item.on("updated", async () => {
       const st = PENDING.get(dupId);
       if (!st) return;
@@ -188,6 +228,7 @@ function setupDownloadManager() {
       const percent = total ? ((received / total) * 100).toFixed(2) : "0";
 
       mainWindow?.webContents.send("download-progress", {
+        dupId,         // 🔥 ADDED
         name: filename,
         received,
         total,
@@ -237,18 +278,18 @@ function setupDownloadManager() {
 
       if (state === "completed") {
         mainWindow?.webContents.send("download-done", {
+          dupId,
           filePath: finalPath,
           name: filename,
         });
 
-        // ADD TO HISTORY ---------------------
         addHistoryEntry(filename, finalPath);
 
         setTimeout(() => {
           registerFileHashes(finalPath).catch(console.error);
         }, 150);
       } else {
-        mainWindow?.webContents.send("download-error", { state });
+        mainWindow?.webContents.send("download-error", { dupId, state });
       }
 
       PENDING.delete(dupId);

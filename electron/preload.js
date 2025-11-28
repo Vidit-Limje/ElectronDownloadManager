@@ -78,7 +78,7 @@ contextBridge.exposeInMainWorld("dm", {
   },
 
   /* -------------------------------------------------- */
-  /*  HISTORY LISTENER (for UI history tab)             */
+  /*  HISTORY LISTENER                                  */
   /* -------------------------------------------------- */
   onHistory(cb) {
     const listener = (_, data) => cb(data);
@@ -92,5 +92,20 @@ contextBridge.exposeInMainWorld("dm", {
   /* -------------------------------------------------- */
   getHistory() {
     return ipcRenderer.invoke("get-history");
+  },
+
+  /* -------------------------------------------------- */
+  /*  PAUSE / RESUME / CANCEL DOWNLOAD                  */
+  /* -------------------------------------------------- */
+  pause(dupId) {
+    ipcRenderer.send("pause-download", dupId);
+  },
+
+  resume(dupId) {
+    ipcRenderer.send("resume-download", dupId);
+  },
+
+  cancel(dupId) {
+    ipcRenderer.send("cancel-download", dupId);
   },
 });
