@@ -6,121 +6,108 @@ import ssdeep from "ssdeep.js";
 import { execFile } from "child_process";
 import Tlsh from "tlsh";
 
-/* ---------------------- SETTINGS ---------------------- */
-// IMPORTANT: double backslashes in Windows path
-const SDHASH_PATH =
-  "C:\\Users\\vidit\\Downloads\\sdhash-4.0-win32\\sdhash-4.0-win32\\sdhash.exe";
+/* ------------------------------------------------------- */
+/*  DATABASE                                                */
+/* ------------------------------------------------------- */
 
-const SSDEEP_THRESHOLD = 80; // 0–100
-const SDHASH_THRESHOLD = 90; // 0–100
+const DB_PATH = path.join(app.getPath("userData"), "hashes.json");
 
-/* ---------------------- DATABASE ---------------------- */
-const DB_DIR = app ? app.getPath("userData") : process.cwd();
-const HASH_DB_PATH = path.join(DB_DIR, "hashes.json");
-
-function ensureDBFile() {
-  fs.mkdirSync(path.dirname(HASH_DB_PATH), { recursive: true });
-  if (!fs.existsSync(HASH_DB_PATH)) {
-    fs.writeFileSync(HASH_DB_PATH, JSON.stringify({}, null, 2), "utf8");
+function ensureDB() {
+  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+  if (!fs.existsSync(DB_PATH)) {
+    fs.writeFileSync(DB_PATH, JSON.stringify({}, null, 2));
   }
 }
 
-function loadDB() {
-  ensureDBFile();
+export function loadDB() {
+  ensureDB();
   try {
-    return JSON.parse(fs.readFileSync(HASH_DB_PATH, "utf8"));
+    return JSON.parse(fs.readFileSync(DB_PATH, "utf8"));
   } catch {
     return {};
   }
 }
 
-function saveDB(db) {
-  ensureDBFile();
-  fs.writeFileSync(HASH_DB_PATH, JSON.stringify(db, null, 2), "utf8");
+export function saveDB(db) {
+  ensureDB();
+  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
 }
 
-/* ---------------------- PARTIAL SHA-256 ---------------------- */
+/* ------------------------------------------------------- */
+/*  FULL SHA256 (SAFE STREAMING FOR LARGE FILES)           */
+/* ------------------------------------------------------- */
+
+export function computeSHA256(filePath) {
+  return new Promise((resolve) => {
+    if (!fs.existsSync(filePath)) return resolve(null);
+
+    const hash = crypto.createHash("sha256");
+    const stream = fs.createReadStream(filePath, { highWaterMark: 1024 * 1024 });
+
+    stream.on("data", async (chunk) => {
+      hash.update(chunk);
+      await new Promise((r) => setTimeout(r, 0)); // yield to avoid freeze
+    });
+
+    stream.on("end", () => resolve(hash.digest("hex")));
+    stream.on("error", () => resolve(null));
+  });
+}
+
+/* ------------------------------------------------------- */
+/*  PARTIAL SHA256                                         */
+/* ------------------------------------------------------- */
+
 export function computePartialSHA256(filePath, maxBytes = 1024 * 1024) {
   return new Promise((resolve) => {
     if (!fs.existsSync(filePath)) return resolve(null);
+
     const hash = crypto.createHash("sha256");
+
     const stream = fs.createReadStream(filePath, {
       start: 0,
       end: maxBytes - 1,
     });
+
     stream.on("data", (chunk) => hash.update(chunk));
     stream.on("end", () => resolve(hash.digest("hex")));
     stream.on("error", () => resolve(null));
   });
 }
 
-/* ---------------------- SHA-256 ---------------------- */
-export function computeSHA256(filePath) {
-  return new Promise((resolve) => {
-    if (!fs.existsSync(filePath)) return resolve(null);
-    const hash = crypto.createHash("sha256");
-    const stream = fs.createReadStream(filePath);
-    stream.on("data", (chunk) => hash.update(chunk));
-    stream.on("end", () => resolve(hash.digest("hex")));
-    stream.on("error", () => resolve(null));
-  });
-}
+/* ------------------------------------------------------- */
+/*  SSDEEP (FIXED API + SAFE READ)                         */
+/* ------------------------------------------------------- */
 
-/* ---------------------- TLSH (optional / not used for detection) ---------------------- */
-export function computeTLSH(filePath) {
-  return new Promise((resolve) => {
-    if (!fs.existsSync(filePath)) return resolve(null);
-    fs.readFile(filePath, (err, data) => {
-      if (err || data.length < 256) return resolve(null);
-      try {
-        const hasher = new Tlsh();
-        hasher.update(data);
-        hasher.final();
-        resolve(hasher.hash());
-      } catch {
-        resolve(null);
-      }
-    });
-  });
-}
-
-export function compareTLSH(h1, h2) {
+export async function computeSsdeep(filePath) {
   try {
-    return Tlsh.diff(h1, h2);
-  } catch {
-    return null;
-  }
-}
-
-/* ---------------------- ssdeep ---------------------- */
-export function computeSsdeep(filePath) {
-  try {
-    const data = fs.readFileSync(filePath);
+    const data = await fs.promises.readFile(filePath);
     return ssdeep.digest(data);
   } catch {
     return null;
   }
 }
 
-export function compareSsdeep(h1, h2) {
+export function compareSsdeep(a, b) {
   try {
-    return ssdeep.compare(h1, h2); // 0–100
+    return ssdeep.fuzzy_compare(a, b); // FINAL FIX
   } catch {
     return null;
   }
 }
 
-/* ---------------------- sdhash ---------------------- */
+/* ------------------------------------------------------- */
+/*  SDHASH                                                  */
+/* ------------------------------------------------------- */
+
+const SDHASH_PATH =
+  "C:\\Users\\vidit\\Desktop\\sdhash-4.0-win32\\sdhash-4.0-win32\\sdhash.exe";
+
 export function computeSdhash(filePath) {
   return new Promise((resolve) => {
-    if (!fs.existsSync(filePath)) return resolve(null);
-
-    // NOTE: depending on your sdhash build, you might need to adjust args.
-    // This assumes: sdhash <file> → prints one line with hash.
     execFile(SDHASH_PATH, [filePath], (err, stdout) => {
       if (err || !stdout) return resolve(null);
-      const line = stdout.split("\n")[0].trim();
-      resolve(line || null);
+      resolve(stdout.trim());
     });
   });
 }
@@ -135,64 +122,71 @@ export function compareSdhash(h1, h2) {
   });
 }
 
-/* ---------------------- DUPLICATE CHECK ---------------------- */
-/**
- * shaOrPartial: can be full sha256 OR partial sha256
- * ssdeepHash: ssdeep fuzzy hash
- * sdhashHash: sdhash fuzzy hash
- * fileName: optional filename check
- */
-export async function checkHashExists(
-  shaOrPartial,
-  ssdeepHash,
-  sdhashHash,
-  fileName = null
-) {
-  const db = loadDB();
+/* ------------------------------------------------------- */
+/*  TLSH (SAFE STREAMING)                                  */
+/* ------------------------------------------------------- */
 
-  // 1️⃣ Filename match
-  if (fileName) {
-    const entry = Object.values(db).find(
-      (e) => e.path && path.basename(e.path) === fileName
-    );
-    if (entry) return { exists: true, path: entry.path, type: "filename" };
-  }
+export async function computeTLSH(filePath) {
+  if (!fs.existsSync(filePath)) return null;
 
-  // 2️⃣ Exact SHA-256 or partial match
-  if (shaOrPartial) {
-    // full hash lookup
-    if (db[shaOrPartial]) {
-      return { exists: true, path: db[shaOrPartial].path, type: "exact" };
+  try {
+    const tl = new Tlsh();
+    const stream = fs.createReadStream(filePath, { highWaterMark: 512 * 1024 });
+
+    for await (const chunk of stream) {
+      tl.update(chunk);
+      await new Promise((r) => setTimeout(r, 0));
     }
 
-    // partial hash lookup
+    tl.final();
+    return tl.hash();
+  } catch {
+    return null;
+  }
+}
+
+/* ------------------------------------------------------- */
+/*  DUPLICATE CHECK                                        */
+/* ------------------------------------------------------- */
+
+export async function checkHashExists(partial, ssdeepHash, sdhashHash, fileName = null) {
+  const db = loadDB();
+
+  // filename match
+  if (fileName) {
+    const found = Object.values(db).find(
+      (e) => e.path && path.basename(e.path) === fileName
+    );
+    if (found) return { exists: true, path: found.path, type: "filename" };
+  }
+
+  // partial match
+  if (partial) {
     for (const entry of Object.values(db)) {
-      if (entry.partial && entry.partial === shaOrPartial) {
+      if (entry.partial === partial) {
         return { exists: true, path: entry.path, type: "partial" };
       }
     }
   }
 
-  // 3️⃣ ssdeep fuzzy
+  // SSDEEP fuzzy
   if (ssdeepHash) {
     for (const entry of Object.values(db)) {
       if (entry.ssdeep) {
         const score = compareSsdeep(ssdeepHash, entry.ssdeep);
-        if (score !== null && score >= SSDEEP_THRESHOLD) {
+        if (score !== null && score >= 80)
           return { exists: true, path: entry.path, type: "ssdeep", score };
-        }
       }
     }
   }
 
-  // 4️⃣ sdhash fuzzy
+  // SDHASH fuzzy
   if (sdhashHash) {
     for (const entry of Object.values(db)) {
       if (entry.sdhash) {
         const score = await compareSdhash(sdhashHash, entry.sdhash);
-        if (score !== null && score >= SDHASH_THRESHOLD) {
+        if (score !== null && score >= 90)
           return { exists: true, path: entry.path, type: "sdhash", score };
-        }
       }
     }
   }
@@ -200,89 +194,30 @@ export async function checkHashExists(
   return { exists: false };
 }
 
-/* ---------------------- REBUILD HASH DATABASE ---------------------- */
-export async function rebuildHashDatabaseFromFolder(folderPath) {
-  const newDB = {};
+/* ------------------------------------------------------- */
+/*  REGISTER NEW FILE SAFE                                 */
+/* ------------------------------------------------------- */
 
-  if (!fs.existsSync(folderPath)) {
-    saveDB(newDB);
-    return newDB;
-  }
-
-  const files = fs.readdirSync(folderPath);
-
-  for (const filename of files) {
-    const filePath = path.join(folderPath, filename);
-
-    if (!fs.statSync(filePath).isFile()) continue;
-
-    console.log("🔍 Hashing:", filePath);
-
-    // ===== Yield back to event loop to prevent freezing =====
-    await new Promise((res) => setTimeout(res, 10));
-
-    const partial = await computePartialSHA256(filePath);
-    const sha256 = await computeSHA256(filePath);
-    const ssdeepHash = computeSsdeep(filePath);
-    const sdhashHash = await computeSdhash(filePath);
-    const tlshHash = await computeTLSH(filePath);
-
-    newDB[sha256] = {
-      path: filePath,
-      partial,
-      ssdeep: ssdeepHash,
-      sdhash: sdhashHash,
-      tlsh: tlshHash,
-    };
-  }
-
-  saveDB(newDB);
-  return newDB;
-}
-
-
-
-/* ---------------------- REGISTER FILE ---------------------- */
 export async function registerFileHashes(filePath) {
   if (!filePath || !fs.existsSync(filePath)) return;
 
-  const partialHash = await computePartialSHA256(filePath);
-  const sha256 = await computeSHA256(filePath);
-  const ssdeepHash = computeSsdeep(filePath);
-  const sdhashHash = await computeSdhash(filePath);
-  const tlshHash = await computeTLSH(filePath);
+  const partial = await computePartialSHA256(filePath);
+  const sha = await computeSHA256(filePath);
+  const sdeep = await computeSsdeep(filePath);
+  const sd = await computeSdhash(filePath);
+  const tl = await computeTLSH(filePath);
 
   const db = loadDB();
-  db[sha256] = {
+
+  db[sha] = {
     path: filePath,
-    partial: partialHash,
-    ssdeep: ssdeepHash,
-    sdhash: sdhashHash,
-    tlsh: tlshHash,
+    partial,
+    ssdeep: sdeep,
+    sdhash: sd,
+    tlsh: tl,
   };
 
   saveDB(db);
 
-  return {
-    sha256,
-    partial: partialHash,
-    ssdeep: ssdeepHash,
-    sdhash: sdhashHash,
-    tlsh: tlshHash,
-    alreadyExists: false,
-  };
+  return { sha, partial };
 }
-
-export default {
-  computePartialSHA256,
-  computeSHA256,
-  computeSsdeep,
-  computeSdhash,
-  computeTLSH,
-  compareSsdeep,
-  compareSdhash,  
-  compareTLSH,
-  checkHashExists,
-  registerFileHashes,
-  rebuildHashDatabaseFromFolder,
-};

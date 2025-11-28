@@ -1,60 +1,65 @@
+// preload.js
 const { contextBridge, ipcRenderer } = require("electron");
 
+// Debug
 console.log("🔥 preload loaded");
 
-// Safely expose API to the UI
+/* ----------------------------------------------------- */
+/*  SAFE API EXPOSED TO WINDOW.dm                        */
+/* ----------------------------------------------------- */
+
 contextBridge.exposeInMainWorld("dm", {
-  
-  // Start download
+  /* -------------------------------------------------- */
+  /*  DOWNLOAD TRIGGER                                  */
+  /* -------------------------------------------------- */
+
   download: (url) => ipcRenderer.send("download", url),
 
-  // Progress updates
-  onProgress: (cb) => {
+  /* -------------------------------------------------- */
+  /*  DOWNLOAD PROGRESS                                 */
+  /* -------------------------------------------------- */
+
+  onProgress(cb) {
     const listener = (_, data) => cb(data);
     ipcRenderer.on("download-progress", listener);
     return () => ipcRenderer.removeListener("download-progress", listener);
   },
 
-  // Download complete
-  onDone: (cb) => {
+  onDone(cb) {
     const listener = (_, data) => cb(data);
     ipcRenderer.on("download-done", listener);
     return () => ipcRenderer.removeListener("download-done", listener);
   },
 
-  // Download error
-  onError: (cb) => {
+  onError(cb) {
     const listener = (_, data) => cb(data);
     ipcRenderer.on("download-error", listener);
     return () => ipcRenderer.removeListener("download-error", listener);
   },
 
-  // Duplicate detection event
-  onDuplicate: (cb) => {
+  /* -------------------------------------------------- */
+  /*  DUPLICATE HANDLER                                 */
+  /* -------------------------------------------------- */
+
+  onDuplicate(cb) {
     const listener = (_, data) => cb(data);
     ipcRenderer.on("duplicate-detected", listener);
     return () =>
       ipcRenderer.removeListener("duplicate-detected", listener);
   },
 
-  // NEW → Listen to history updates
-  onHistory: (cb) => {
-    const listener = (_, data) => cb(data);
-    ipcRenderer.on("history-updated", listener);
-    return () =>
-      ipcRenderer.removeListener("history-updated", listener);
-  },
-
-  // Send user decision on duplicate handling
-  sendDecision: (dupId, payload) => {
+  sendDecision(dupId, payload) {
     ipcRenderer.send(`download-decision-${dupId}`, payload);
   },
 
-  rebuildHashDB: () => ipcRenderer.invoke("rebuild-hash-db"),
-  onHashProgress: (cb) => {
-  const listener = (_, data) => cb(data);
-  ipcRenderer.on("hash-progress", listener);
-  return () => ipcRenderer.removeListener("hash-progress", listener);
+  /* -------------------------------------------------- */
+  /* OPTIONAL: DOWNLOAD STARTED                         */
+  /* -------------------------------------------------- */
+
+  onStart(cb) {
+    const listener = (_, data) => cb(data);
+    ipcRenderer.on("download-started", listener);
+    return () => ipcRenderer.removeListener("download-started", listener);
   },
 
 });
