@@ -13,7 +13,9 @@ import {
 } from "./hasher.js";
 
 let mainWindow;
-const PENDING = new Map();
+const PENDING = new Map(); // dupId -> { item, checkedPartial, savePath }
+const PRE_DECISIONS = new Map(); // dupId -> { url, filename } for URL-initiated duplicates
+const NEXT_SAVE_PATH = new Map(); // filename -> forced savePath to use in will-download
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -81,12 +83,24 @@ app.whenReady().then(() => {
     // New folder: Downloads/electron
     const electronFolder = path.join(app.getPath("downloads"), "electron");
     fs.mkdirSync(electronFolder, { recursive: true });
-    const savePath = path.join(electronFolder, filename);
+
+    // Check if main process requested a forced savePath for this filename
+    let savePath;
+    if (NEXT_SAVE_PATH.has(filename)) {
+      savePath = NEXT_SAVE_PATH.get(filename);
+      NEXT_SAVE_PATH.delete(filename);
+      // ensure directory exists
+      fs.mkdirSync(path.dirname(savePath), { recursive: true });
+      console.log("ℹ️ Using forced save path for", filename, "=>", savePath);
+    } else {
+      savePath = path.join(electronFolder, filename);
+    }
 
     // 🔥 Log filename duplicate
-    if (fs.existsSync(savePath)) {
+    if (!NEXT_SAVE_PATH.has(filename) && fs.existsSync(savePath)) {
       console.log("🚫 BLOCKED: Filename duplicate detected →", savePath);
       mainWindow?.webContents.send("duplicate-detected", {
+        dupId: null,
         name: filename,
         existingPath: savePath,
         matchType: "filename",
@@ -132,7 +146,7 @@ app.whenReady().then(() => {
           );
 
           if (hit.exists) {
-            // 🔥 NEW TERMINAL LOGS FOR DUPLICATE DETECTION
+            // Terminal logs for duplicate detection
             console.log("\n=======================================");
             console.log("⚠️  DUPLICATE DETECTED DURING DOWNLOAD");
             console.log("→ Type:", hit.type);
@@ -142,21 +156,76 @@ app.whenReady().then(() => {
 
             item.pause();
 
+            // send dup info with dupId so UI can respond
             mainWindow?.webContents.send("duplicate-detected", {
               dupId,
               name: filename,
               existingPath: hit.path,
               matchType: hit.type,
               score: hit.score || null,
+              partialHash: partialHash || null,
             });
 
-            ipcMain.once(`download-decision-${dupId}`, (_, decision) => {
-              if (decision?.continue) item.resume();
-              else {
+            // handle UI decision for this in-progress download
+            ipcMain.once(`download-decision-${dupId}`, async (_, decision) => {
+              if (!decision) {
+                console.log("❌ No decision received — cancelling.");
                 item.cancel();
                 fs.unlink(savePath, () => {});
+                PENDING.delete(dupId);
+                return;
               }
-              PENDING.delete(dupId);
+
+              if (decision.action === "overwrite") {
+                console.log("📝 OVERWRITE requested — deleting existing and resuming.");
+                try {
+                  fs.unlinkSync(decision.existingPath);
+                } catch (e) {
+                  console.warn("Failed to delete existing file:", e);
+                }
+                item.setSavePath(decision.existingPath);
+                item.resume();
+                PENDING.delete(dupId);
+                return;
+              }
+
+              if (decision.action === "rename") {
+                console.log("📝 RENAME requested — generating new filename.");
+                const base = path.basename(savePath, path.extname(savePath));
+                const ext = path.extname(savePath);
+                const dir = path.dirname(savePath);
+
+                let counter = 1;
+                let newPath = path.join(dir, `${base} (${counter})${ext}`);
+                while (fs.existsSync(newPath)) {
+                  counter++;
+                  newPath = path.join(dir, `${base} (${counter})${ext}`);
+                }
+
+                console.log("📄 Renamed to:", newPath);
+                item.setSavePath(newPath);
+                item.resume();
+                PENDING.delete(dupId);
+                return;
+              }
+
+              if (decision.action === "skip") {
+                console.log("🚫 SKIP requested — cancelling download.");
+                item.cancel();
+                fs.unlink(savePath, () => {});
+                PENDING.delete(dupId);
+                return;
+              }
+
+              // fallback: resume if continue
+              if (decision.continue) {
+                item.resume();
+                PENDING.delete(dupId);
+              } else {
+                item.cancel();
+                fs.unlink(savePath, () => {});
+                PENDING.delete(dupId);
+              }
             });
           }
         } catch (err) {
@@ -200,8 +269,95 @@ async function handleDownload(url) {
   const guessedName = path.basename(new URL(url).pathname || "unknown");
   const nameToCheck = guessedName || "unknown";
 
+  // If a file with this guessed name already exists, prompt user
+  const electronFolder = path.join(app.getPath("downloads"), "electron");
+  fs.mkdirSync(electronFolder, { recursive: true });
+  const existingPath = path.join(electronFolder, nameToCheck);
+
+  if (fs.existsSync(existingPath)) {
+    // create dupId and store pre-decision state
+    const dupId = `${Date.now()}-pre-${Math.random().toString(36).slice(2)}`;
+    PRE_DECISIONS.set(dupId, { url, filename: nameToCheck, existingPath });
+
+    console.log("🚫 Detected filename duplicate before start:", existingPath);
+    mainWindow?.webContents.send("duplicate-detected", {
+      dupId,
+      name: nameToCheck,
+      existingPath,
+      matchType: "filename",
+      partialHash: null,
+    });
+
+    // wait for UI decision
+    ipcMain.once(`download-decision-${dupId}`, async (_, decision) => {
+      PRE_DECISIONS.delete(dupId);
+
+      if (!decision) {
+        console.log("❌ No decision received for pre-download dup — skipping.");
+        return;
+      }
+
+      if (decision.action === "overwrite") {
+        console.log("📝 Pre-download OVERWRITE requested → deleting existing & starting download");
+        try {
+          fs.unlinkSync(existingPath);
+        } catch (e) {
+          console.warn("Failed to delete existing file (pre-overwrite):", e);
+        }
+        // set forced savePath to overwrite
+        NEXT_SAVE_PATH.set(nameToCheck, existingPath);
+        mainWindow?.webContents.downloadURL(url);
+        return;
+      }
+
+      if (decision.action === "rename") {
+        console.log("📝 Pre-download RENAME requested → generating new filename & starting download");
+
+        const base = path.basename(existingPath, path.extname(existingPath));
+        const ext = path.extname(existingPath);
+        const dir = path.dirname(existingPath);
+
+        let counter = 1;
+        let newPath = path.join(dir, `${base} (${counter})${ext}`);
+        while (fs.existsSync(newPath)) {
+          counter++;
+          newPath = path.join(dir, `${base} (${counter})${ext}`);
+        }
+
+        NEXT_SAVE_PATH.set(nameToCheck, newPath);
+        mainWindow?.webContents.downloadURL(url);
+        return;
+      }
+
+      if (decision.action === "skip") {
+        console.log("🚫 Pre-download SKIP requested — not starting download.");
+        return;
+      }
+
+      // fallback: if decision.continue true, just start download (will be blocked by filename unless NEXT_SAVE_PATH set)
+      if (decision.continue) {
+        // set forced path to a new variant to avoid blocking
+        const base = path.basename(existingPath, path.extname(existingPath));
+        const ext = path.extname(existingPath);
+        const dir = path.dirname(existingPath);
+        let counter = 1;
+        let newPath = path.join(dir, `${base} (${counter})${ext}`);
+        while (fs.existsSync(newPath)) {
+          counter++;
+          newPath = path.join(dir, `${base} (${counter})${ext}`);
+        }
+        NEXT_SAVE_PATH.set(nameToCheck, newPath);
+        mainWindow?.webContents.downloadURL(url);
+      }
+      return;
+    });
+
+    return; // wait for decision
+  }
+
+  // No filename duplicate — proceed normally
   const hit = await checkHashExists(null, null, null, nameToCheck);
-  if (hit.exists) {
+  if (hit.exists && hit.type === "filename") {
     console.log(
       "🚫 BLOCKED BEFORE START (filename duplicate):",
       nameToCheck,
@@ -209,6 +365,7 @@ async function handleDownload(url) {
       hit.path
     );
     mainWindow?.webContents.send("duplicate-detected", {
+      dupId: null,
       name: nameToCheck,
       existingPath: hit.path,
       matchType: "filename",
@@ -233,22 +390,54 @@ function downloadGoogleDriveFile(url) {
     const match = disposition?.match(/filename\*?=(?:UTF-8'')?["']?([^;"']+)/);
     if (match) filename = decodeURIComponent(match[1]);
 
+    const electronFolder = path.join(app.getPath("downloads"), "electron");
+    fs.mkdirSync(electronFolder, { recursive: true });
+    const existingPath = path.join(electronFolder, filename);
+
     const exists = await checkHashExists(null, null, null, filename);
-    if (exists?.exists) {
-      console.log("🚫 Google Drive filename duplicate →", exists.path);
+    if (exists?.exists || fs.existsSync(existingPath)) {
+      const dupId = `${Date.now()}-pre-${Math.random().toString(36).slice(2)}`;
+      PRE_DECISIONS.set(dupId, { url: directUrl, filename, existingPath });
+
+      console.log("🚫 Google Drive filename duplicate →", existingPath);
       mainWindow?.webContents.send("duplicate-detected", {
+        dupId,
         name: filename,
-        existingPath: exists.path,
+        existingPath,
         matchType: "filename",
       });
-      response.destroy();
+
+      ipcMain.once(`download-decision-${dupId}`, async (_, decision) => {
+        PRE_DECISIONS.delete(dupId);
+        if (!decision) return;
+        if (decision.action === "overwrite") {
+          try {
+            fs.unlinkSync(existingPath);
+          } catch (e) {}
+          NEXT_SAVE_PATH.set(filename, existingPath);
+          mainWindow?.webContents.downloadURL(directUrl);
+        } else if (decision.action === "rename") {
+          const base = path.basename(existingPath, path.extname(existingPath));
+          const ext = path.extname(existingPath);
+          const dir = path.dirname(existingPath);
+          let counter = 1;
+          let newPath = path.join(dir, `${base} (${counter})${ext}`);
+          while (fs.existsSync(newPath)) {
+            counter++;
+            newPath = path.join(dir, `${base} (${counter})${ext}`);
+          }
+          NEXT_SAVE_PATH.set(filename, newPath);
+          mainWindow?.webContents.downloadURL(directUrl);
+        } else {
+          // skip
+          return;
+        }
+      });
+
       return;
     }
 
-    const electronFolder = path.join(app.getPath("downloads"), "electron");
-    fs.mkdirSync(electronFolder, { recursive: true });
     const filePath = path.join(electronFolder, filename);
-
     const ws = fs.createWriteStream(filePath);
 
     response.pipe(ws);

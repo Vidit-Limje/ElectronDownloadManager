@@ -7,29 +7,36 @@ export default function App() {
 
   // Modal data from duplicate-detected event
   const [dupModal, setDupModal] = useState(null);
-  // dupModal = { dupId, name, partialHash, existingPath, matchType, distance }
+  // dupModal = { dupId, name, partialHash, existingPath, matchType, score }
 
   useEffect(() => {
     // progress/done/error listeners
-    window.dm?.onProgress((p) => {
+    const unsubProgress = window.dm?.onProgress((p) => {
       setProgress(Number(p.percent));
-      setStatus(`Downloading ${p.name} — ${p.percent}%`);
+      setStatus(`Downloading ${p.name} — ${Number(p.percent).toFixed(2)}%`);
     });
 
-    window.dm?.onDone((d) => {
+    const unsubDone = window.dm?.onDone((d) => {
       setStatus(`✅ Download complete: ${d.name || d.filePath}`);
       setProgress(0);
     });
 
-    window.dm?.onError(() => {
+    const unsubError = window.dm?.onError(() => {
       setStatus(`❌ Download error`);
       setProgress(0);
     });
 
-    // Duplicate or fuzzy match detected
-    window.dm?.onDuplicate((data) => {
+    const unsubDup = window.dm?.onDuplicate((data) => {
+      // data may have dupId null for immediate filename-only detection in will-download
       setDupModal(data);
     });
+
+    return () => {
+      unsubProgress && unsubProgress();
+      unsubDone && unsubDone();
+      unsubError && unsubError();
+      unsubDup && unsubDup();
+    };
   }, []);
 
   function startDownload() {
@@ -38,19 +45,18 @@ export default function App() {
     window.dm?.download(url);
   }
 
-  function onDecision(shouldContinue) {
+  function sendDecision(action) {
     if (!dupModal) return;
-    window.dm?.sendDecision(dupModal.dupId, { continue: !!shouldContinue });
+    // action: "overwrite" | "rename" | "skip"
+    const payload =
+      action === "overwrite"
+        ? { action: "overwrite", existingPath: dupModal.existingPath }
+        : { action };
+    window.dm?.sendDecision(dupModal.dupId, payload);
     setDupModal(null);
-    setStatus(shouldContinue ? "Resuming download..." : "Download cancelled");
-  }
-
-  // Convert TLSH distance → similarity %
-  function computeSimilarity(distance) {
-    if (distance == null) return null;
-    const maxDist = 200; // conservative scaling
-    const sim = Math.max(0, 100 - (distance / maxDist) * 100);
-    return sim.toFixed(1);
+    if (action === "skip") setStatus("Download cancelled");
+    else if (action === "overwrite") setStatus("Overwriting existing file...");
+    else if (action === "rename") setStatus("Saving as new file...");
   }
 
   return (
@@ -77,7 +83,7 @@ export default function App() {
         {progress > 0 && (
           <div style={{ marginTop: 8 }}>
             <progress value={progress} max="100" style={{ width: 420 }} />
-            <div>{progress}%</div>
+            <div>{Number(progress).toFixed(2)}%</div>
           </div>
         )}
       </div>
@@ -91,7 +97,7 @@ export default function App() {
             top: 0,
             right: 0,
             bottom: 0,
-            background: "rgba(0,0,0,0.4)",
+            background: "rgba(0,0,0,0.45)",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
@@ -103,7 +109,7 @@ export default function App() {
               background: "#fff",
               padding: 24,
               borderRadius: 10,
-              width: 540,
+              width: 560,
               boxShadow: "0 6px 18px rgba(0,0,0,0.2)",
             }}
           >
@@ -117,25 +123,20 @@ export default function App() {
               While downloading <strong>{dupModal.name}</strong>,{" "}
               {dupModal.matchType === "fuzzy"
                 ? "a file with high similarity"
-                : "an identical file"}{" "}
+                : "an existing file"}{" "}
               was found on your system.
             </p>
 
-            {dupModal.matchType === "fuzzy" && dupModal.distance != null && (
+            {dupModal.score != null && (
               <p>
-                Similarity confidence:{" "}
-                <strong>{computeSimilarity(dupModal.distance)}%</strong>{" "}
-                (TLSH distance = {dupModal.distance})
+                Similarity score: <strong>{dupModal.score}%</strong>
               </p>
             )}
 
             <p>
-              Partial SHA-256 (first 1MB):{" "}
-              <code style={{ wordBreak: "break-all" }}>
-                {dupModal.partialHash}
-              </code>
+              Existing file:{" "}
+              <code style={{ wordBreak: "break-all" }}>{dupModal.existingPath}</code>
             </p>
-            <p>Existing file: {dupModal.existingPath}</p>
 
             <div
               style={{
@@ -146,7 +147,7 @@ export default function App() {
               }}
             >
               <button
-                onClick={() => onDecision(false)}
+                onClick={() => sendDecision("skip")}
                 style={{
                   padding: "8px 12px",
                   background: "#f44336",
@@ -156,10 +157,11 @@ export default function App() {
                   cursor: "pointer",
                 }}
               >
-                Cancel download
+                Skip
               </button>
+
               <button
-                onClick={() => onDecision(true)}
+                onClick={() => sendDecision("rename")}
                 style={{
                   padding: "8px 12px",
                   background: "#2196f3",
@@ -169,7 +171,21 @@ export default function App() {
                   cursor: "pointer",
                 }}
               >
-                Continue anyway
+                Save as new file
+              </button>
+
+              <button
+                onClick={() => sendDecision("overwrite")}
+                style={{
+                  padding: "8px 12px",
+                  background: "#ff9800",
+                  color: "#fff",
+                  border: "none",
+                  borderRadius: 6,
+                  cursor: "pointer",
+                }}
+              >
+                Overwrite
               </button>
             </div>
           </div>

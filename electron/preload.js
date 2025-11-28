@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
+console.log("🔥 preload loaded");
 
 contextBridge.exposeInMainWorld("dm", {
   download: (url) => ipcRenderer.send("download", url),
@@ -21,15 +22,15 @@ contextBridge.exposeInMainWorld("dm", {
     return () => ipcRenderer.removeListener("download-error", l);
   },
 
-  /** Fuzzy / exact duplicate detection */
+  /** Duplicate detection event */
   onDuplicate: (cb) => {
     const l = (_, data) => cb(data);
     ipcRenderer.on("duplicate-detected", l);
     return () => ipcRenderer.removeListener("duplicate-detected", l);
   },
 
-  /** Continue / cancel feedback */
-  sendDecision: (dupId, decision) => {
-    ipcRenderer.send(`download-decision-${dupId}`, decision);
+  /** Send user decision (action object) back to main */
+  sendDecision: (dupId, data) => {
+    ipcRenderer.send(`download-decision-${dupId}`, data);
   },
 });
