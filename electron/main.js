@@ -6,7 +6,7 @@ import https from "https";
 import http from "http";
 import { fileURLToPath } from "url";
 
-// Import updated hashing safely
+// hashing imports
 import {
   computePartialSHA256,
   computeSsdeep,
@@ -18,7 +18,43 @@ let mainWindow;
 
 const PENDING = new Map();
 const PRE_DECISIONS = new Map();
+
+// IMPORTANT: renamed save paths stored by dupId
 const NEXT_SAVE_PATH = new Map();
+
+// ---------- HISTORY SYSTEM ----------
+const HISTORY_PATH = path.join(app.getPath("userData"), "history.json");
+
+function loadHistory() {
+  try {
+    if (!fs.existsSync(HISTORY_PATH)) return [];
+    return JSON.parse(fs.readFileSync(HISTORY_PATH, "utf8"));
+  } catch {
+    return [];
+  }
+}
+
+function saveHistory(list) {
+  fs.writeFileSync(HISTORY_PATH, JSON.stringify(list, null, 2));
+}
+
+function addHistoryEntry(name, filePath) {
+  const list = loadHistory();
+
+  list.unshift({
+    name,
+    filePath,
+    timestamp: Date.now(),
+  });
+
+  saveHistory(list);
+
+  // Notify frontend
+  if (mainWindow) {
+    mainWindow.webContents.send("history-updated", list);
+  }
+}
+// ------------------------------------
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -62,14 +98,11 @@ function startExtensionListener() {
             return;
           }
         } catch (e) {
-          console.error("❌ Bad extension POST", e);
+          console.error("❌ Bad extension POST:", e);
         }
-        res.writeHead(400);
-        res.end("bad request");
+        res.writeHead(400).end("bad request");
       });
-    } else {
-      res.writeHead(404).end("not found");
-    }
+    } else res.writeHead(404).end("not found");
   });
 
   server.listen(5050, "127.0.0.1", () =>
@@ -84,16 +117,24 @@ app.whenReady().then(() => {
   startExtensionListener();
   createWindow();
   setupIPCDownloadTrigger();
+  setupHistoryHandlers();      // <-- ADDED
   setupDownloadManager();
 });
 
 /* ------------------------------------------------------- */
-/* USER INITIATED DOWNLOAD                                 */
+/* HISTORY IPC HANDLERS                                     */
+/* ------------------------------------------------------- */
+function setupHistoryHandlers() {
+  ipcMain.handle("get-history", async () => {
+    return loadHistory();
+  });
+}
+
+/* ------------------------------------------------------- */
+/* UI TRIGGERED DOWNLOAD                                   */
 /* ------------------------------------------------------- */
 function setupIPCDownloadTrigger() {
-  ipcMain.on("download", (_, url) => {
-    if (url) handleDownload(url);
-  });
+  ipcMain.on("download", (_, url) => url && handleDownload(url));
 }
 
 /* ------------------------------------------------------- */
@@ -107,19 +148,19 @@ function setupDownloadManager() {
     const downloadsFolder = path.join(app.getPath("downloads"), "electron");
     fs.mkdirSync(downloadsFolder, { recursive: true });
 
-    let savePath = NEXT_SAVE_PATH.get(filename);
-    if (savePath) {
-      NEXT_SAVE_PATH.delete(filename);
-    } else {
-      savePath = path.join(downloadsFolder, filename);
-    }
+    let savePath = NEXT_SAVE_PATH.get(dupId);
+    const originalPath = path.join(downloadsFolder, filename);
 
-    /* FILENAME DUP CHECK */
-    if (!NEXT_SAVE_PATH.has(filename) && fs.existsSync(savePath)) {
+    if (!savePath) savePath = originalPath;
+
+    // block only original name duplicates
+    if (savePath === originalPath && fs.existsSync(originalPath)) {
+      console.log("🚫 Filename duplicate:", originalPath);
+
       mainWindow?.webContents.send("duplicate-detected", {
         dupId: null,
         name: filename,
-        existingPath: savePath,
+        existingPath: originalPath,
         matchType: "filename",
       });
 
@@ -128,14 +169,19 @@ function setupDownloadManager() {
     }
 
     item.setSavePath(savePath);
-    PENDING.set(dupId, { item, checkedPartial: false, savePath });
+
+    PENDING.set(dupId, {
+      item,
+      savePath,
+      checkedPartial: false,
+    });
 
     /* --------------------------------------------------- */
-    /* PROGRESS EVENT                                      */
+    /* PROGRESS                                            */
     /* --------------------------------------------------- */
     item.on("updated", async () => {
-      const state = PENDING.get(dupId);
-      if (!state) return;
+      const st = PENDING.get(dupId);
+      if (!st) return;
 
       const received = item.getReceivedBytes();
       const total = item.getTotalBytes();
@@ -148,18 +194,17 @@ function setupDownloadManager() {
         percent,
       });
 
-      /* -------- PARTIAL DUPLICATE CHECK -------- */
-      if (!state.checkedPartial && received >= 1024 * 1024) {
-        state.checkedPartial = true;
+      // partial duplicate check
+      if (!st.checkedPartial && received >= 1024 * 1024) {
+        st.checkedPartial = true;
 
         try {
-          const partialHash = await computePartialSHA256(savePath);
-          const ssdeepHash = await computeSsdeep(savePath); // FIXED (async)
+          const partial = await computePartialSHA256(st.savePath);
+          const sdeep = await computeSsdeep(st.savePath);
 
-          const hit = await checkHashExists(partialHash, ssdeepHash, null);
+          const hit = await checkHashExists(partial, sdeep, null);
 
           if (hit.exists) {
-            console.log("⚠️ DUPLICATE DETECTED DURING DOWNLOAD:", hit);
             item.pause();
 
             mainWindow?.webContents.send("duplicate-detected", {
@@ -173,49 +218,47 @@ function setupDownloadManager() {
             waitForDecisionDuringDownload(
               dupId,
               item,
-              savePath,
+              st.savePath,
               filename,
               hit
             );
           }
         } catch (err) {
-          console.error("Partial dup check error:", err);
+          console.log("Partial dup error:", err);
         }
       }
     });
 
     /* --------------------------------------------------- */
-    /* DOWNLOAD COMPLETED                                  */
-    /* --------------------------------------------------- */
-    item.once("done", async (_, stateStr) => {
+    /* COMPLETE / FAIL                                     */
+/* --------------------------------------------------- */
+    item.once("done", async (_, state) => {
       const finalPath = item.getSavePath();
 
-      if (stateStr === "completed") {
+      if (state === "completed") {
         mainWindow?.webContents.send("download-done", {
           filePath: finalPath,
           name: filename,
         });
 
-        /* SAFE POST-DOWNLOAD HASHING (non-blocking) */
+        // ADD TO HISTORY ---------------------
+        addHistoryEntry(filename, finalPath);
+
         setTimeout(() => {
-          registerFileHashes(finalPath)
-            .then(() => console.log("🔐 Hashes stored"))
-            .catch(console.error);
-        }, 100);
+          registerFileHashes(finalPath).catch(console.error);
+        }, 150);
       } else {
-        mainWindow?.webContents.send("download-error", { state: stateStr });
+        mainWindow?.webContents.send("download-error", { state });
       }
 
-      // Cleanup
-      for (const [k, v] of PENDING.entries()) {
-        if (v.item === item) PENDING.delete(k);
-      }
+      PENDING.delete(dupId);
+      NEXT_SAVE_PATH.delete(dupId);
     });
   });
 }
 
 /* ------------------------------------------------------- */
-/* DUP DECISION DURING DOWNLOAD                            */
+/* DUP DECISION HANDLER DURING DOWNLOAD                    */
 /* ------------------------------------------------------- */
 function waitForDecisionDuringDownload(dupId, item, savePath, filename, hit) {
   ipcMain.once(`download-decision-${dupId}`, (_, decision) => {
@@ -235,16 +278,19 @@ function waitForDecisionDuringDownload(dupId, item, savePath, filename, hit) {
     }
 
     if (decision.action === "rename") {
+      const dir = path.dirname(savePath);
       const base = path.basename(savePath, path.extname(savePath));
       const ext = path.extname(savePath);
-      const dir = path.dirname(savePath);
 
       let counter = 1;
       let newPath = path.join(dir, `${base} (${counter})${ext}`);
+
       while (fs.existsSync(newPath)) {
         counter++;
         newPath = path.join(dir, `${base} (${counter})${ext}`);
       }
+
+      NEXT_SAVE_PATH.set(dupId, newPath);
 
       item.setSavePath(newPath);
       item.resume();
@@ -257,11 +303,7 @@ function waitForDecisionDuringDownload(dupId, item, savePath, filename, hit) {
       return;
     }
 
-    if (decision.continue) {
-      item.resume();
-    } else {
-      item.cancel();
-    }
+    item.resume();
   });
 }
 
@@ -269,17 +311,14 @@ function waitForDecisionDuringDownload(dupId, item, savePath, filename, hit) {
 /* URL DOWNLOAD STARTER                                    */
 /* ------------------------------------------------------- */
 async function handleDownload(url) {
-  if (!url) return;
-
   const guessedName = path.basename(new URL(url).pathname || "unknown");
-  const electronFolder = path.join(app.getPath("downloads"), "electron");
+  const folder = path.join(app.getPath("downloads"), "electron");
+  fs.mkdirSync(folder, { recursive: true });
 
-  fs.mkdirSync(electronFolder, { recursive: true });
+  const filePath = path.join(folder, guessedName);
 
-  const existingPath = path.join(electronFolder, guessedName);
-
-  if (fs.existsSync(existingPath)) {
-    handlePreDownloadDuplicate(url, guessedName, existingPath);
+  if (fs.existsSync(filePath)) {
+    handlePreDownloadDuplicate(url, guessedName, filePath);
     return;
   }
 
@@ -287,11 +326,10 @@ async function handleDownload(url) {
 }
 
 /* ------------------------------------------------------- */
-/* PRE-DOWNLOAD DUP HANDLING                               */
+/* PRE-DOWNLOAD DUP HANDLER                                */
 /* ------------------------------------------------------- */
 function handlePreDownloadDuplicate(url, filename, existingPath) {
   const dupId = `${Date.now()}-pre-${Math.random().toString(36).slice(2)}`;
-  PRE_DECISIONS.set(dupId, { url, filename, existingPath });
 
   mainWindow?.webContents.send("duplicate-detected", {
     dupId,
@@ -301,76 +339,33 @@ function handlePreDownloadDuplicate(url, filename, existingPath) {
   });
 
   ipcMain.once(`download-decision-${dupId}`, (_, decision) => {
-    PRE_DECISIONS.delete(dupId);
     if (!decision) return;
+
+    const dir = path.dirname(existingPath);
+    const base = path.basename(existingPath, path.extname(existingPath));
+    const ext = path.extname(existingPath);
 
     if (decision.action === "overwrite") {
       try {
         fs.unlinkSync(existingPath);
       } catch {}
-      NEXT_SAVE_PATH.set(filename, existingPath);
+      NEXT_SAVE_PATH.set(dupId, existingPath);
       mainWindow?.webContents.downloadURL(url);
       return;
     }
 
     if (decision.action === "rename") {
-      const base = path.basename(existingPath, path.extname(existingPath));
-      const ext = path.extname(existingPath);
-      const dir = path.dirname(existingPath);
-
       let counter = 1;
       let newPath = path.join(dir, `${base} (${counter})${ext}`);
+
       while (fs.existsSync(newPath)) {
         counter++;
         newPath = path.join(dir, `${base} (${counter})${ext}`);
       }
 
-      NEXT_SAVE_PATH.set(filename, newPath);
+      NEXT_SAVE_PATH.set(dupId, newPath);
       mainWindow?.webContents.downloadURL(url);
       return;
     }
-  });
-}
-
-/* ------------------------------------------------------- */
-/* GOOGLE DRIVE HANDLING                                   */
-/* ------------------------------------------------------- */
-function downloadGoogleDriveFile(url) {
-  const fileId = url.match(/(?:id=|\/d\/)([a-zA-Z0-9_-]+)/)?.[1];
-  if (!fileId) return;
-
-  const directUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
-
-  https.get(directUrl, async (response) => {
-    const disposition = response.headers["content-disposition"];
-    let filename = `drive_${fileId}`;
-    const match = disposition?.match(/filename\*?=(?:UTF-8'')?["']?([^;"']+)/);
-    if (match) filename = decodeURIComponent(match[1]);
-
-    const folder = path.join(app.getPath("downloads"), "electron");
-    fs.mkdirSync(folder, { recursive: true });
-    const fullPath = path.join(folder, filename);
-
-    if (fs.existsSync(fullPath)) {
-      handlePreDownloadDuplicate(directUrl, filename, fullPath);
-      return;
-    }
-
-    const ws = fs.createWriteStream(fullPath);
-
-    response.pipe(ws);
-    ws.on("finish", () => {
-      mainWindow?.webContents.send("download-done", {
-        name: filename,
-        filePath: fullPath,
-      });
-
-      // safe background hashing
-      setTimeout(() => {
-        registerFileHashes(fullPath).catch(console.error);
-      }, 150);
-    });
-
-    ws.on("error", (err) => console.error("Drive download error:", err));
   });
 }

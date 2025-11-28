@@ -6,14 +6,20 @@ export default function App() {
   const [progress, setProgress] = useState(0);
   const [dupModal, setDupModal] = useState(null);
 
+  const [activeTab, setActiveTab] = useState("download"); // "download" | "history"
+  const [history, setHistory] = useState([]);
+
+  /* -------------------------------------------------- */
+  /*  IPC LISTENERS                                     */
+  /* -------------------------------------------------- */
   useEffect(() => {
     const unsubProgress = window.dm?.onProgress((p) => {
       setProgress(Number(p.percent));
-      setStatus(`⬇️ Downloading ${p.name} — ${Number(p.percent).toFixed(2)}%`);
+      setStatus(`Downloading ${p.name} – ${Number(p.percent).toFixed(2)}%`);
     });
 
     const unsubDone = window.dm?.onDone((d) => {
-      setStatus(`✅ Download complete: ${d.name}`);
+      setStatus(`✔ Download complete: ${d.name}`);
       setProgress(0);
     });
 
@@ -26,14 +32,25 @@ export default function App() {
       setDupModal(data);
     });
 
+    const unsubHistory = window.dm?.onHistory((list) => {
+      setHistory(list);
+    });
+
+    // load initial history
+    window.dm?.getHistory().then((list) => setHistory(list || []));
+
     return () => {
-      unsubProgress && unsubProgress();
-      unsubDone && unsubDone();
-      unsubError && unsubError();
-      unsubDup && unsubDup();
+      unsubProgress?.();
+      unsubDone?.();
+      unsubError?.();
+      unsubDup?.();
+      unsubHistory?.();
     };
   }, []);
 
+  /* -------------------------------------------------- */
+  /*  HANDLERS                                          */
+  /* -------------------------------------------------- */
   const startDownload = () => {
     if (!url.trim()) return alert("Enter URL");
     setStatus("Starting download...");
@@ -49,48 +66,51 @@ export default function App() {
         : { action };
 
     window.dm?.sendDecision(dupModal.dupId, payload);
-    setDupModal(null);
 
+    setDupModal(null);
     if (action === "skip") setStatus("Download cancelled");
     if (action === "overwrite") setStatus("Overwriting existing file...");
-    if (action === "rename") setStatus("Saving as a new file...");
+    if (action === "rename") setStatus("Saving file as new...");
   };
 
+  /* -------------------------------------------------- */
+  /*  RENDER                                            */
+  /* -------------------------------------------------- */
   return (
-    <div style={rootStyle}>
-      <div style={cardStyle}>
-        <h1 style={titleStyle}>⚡ Smart Download Manager</h1>
-
-        {/* Input */}
-        <div style={inputRowStyle}>
-          <input
-            style={inputStyle}
-            placeholder="Paste file URL…"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-          />
-          <button style={btnBlue} onClick={startDownload}>
-            Download
-          </button>
+    <div style={layout}>
+      {/* ---------------- LEFT SIDEBAR ---------------- */}
+      <div style={sidebar}>
+        <div
+          style={tab(activeTab === "download")}
+          onClick={() => setActiveTab("download")}
+        >
+          📥 Downloads
         </div>
 
-        {/* Status */}
-        {status && <div style={statusBox}>{status}</div>}
-
-        {/* Progress bar */}
-        {progress > 0 && (
-          <div style={{ marginTop: 10 }}>
-            <div style={progressOuter}>
-              <div style={{ ...progressInner, width: `${progress}%` }}></div>
-            </div>
-            <div style={{ fontSize: 13, opacity: 0.7 }}>
-              {progress.toFixed(2)}%
-            </div>
-          </div>
-        )}
+        <div
+          style={tab(activeTab === "history")}
+          onClick={() => setActiveTab("history")}
+        >
+          📚 History
+        </div>
       </div>
 
-      {/* Duplicate Modal */}
+      {/* ---------------- MAIN CONTENT ---------------- */}
+      <div style={content}>
+        {activeTab === "download" && (
+          <DownloadUI
+            url={url}
+            setUrl={setUrl}
+            startDownload={startDownload}
+            status={status}
+            progress={progress}
+          />
+        )}
+
+        {activeTab === "history" && <HistoryUI history={history} />}
+      </div>
+
+      {/* ---------------- DUPLICATE MODAL ---------------- */}
       {dupModal && (
         <DuplicateModal dupModal={dupModal} sendDecision={sendDecision} />
       )}
@@ -98,29 +118,103 @@ export default function App() {
   );
 }
 
-/* ----------------------------- MODAL ----------------------------- */
+/* ---------------------------------------------------------- */
+/*  DOWNLOAD PAGE UI                                          */
+/* ---------------------------------------------------------- */
+
+function DownloadUI({ url, setUrl, startDownload, status, progress }) {
+  return (
+    <div style={card}>
+      <h1 style={title}>⚡ Smart Duplicate-Aware Downloader</h1>
+
+      {/* URL Input */}
+      <div style={inputRow}>
+        <input
+          style={input}
+          placeholder="Paste file URL…"
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+        />
+        <button style={btnBlue} onClick={startDownload}>
+          Download
+        </button>
+      </div>
+
+      {/* Status */}
+      {status && <div style={statusBox}>{status}</div>}
+
+      {/* Progress */}
+      {progress > 0 && (
+        <div style={{ marginTop: 10 }}>
+          <div style={progressOuter}>
+            <div style={{ ...progressInner, width: `${progress}%` }} />
+          </div>
+          <div style={{ fontSize: 13, opacity: 0.7 }}>
+            {progress.toFixed(2)}%
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------- */
+/*  HISTORY PAGE UI                                           */
+/* ---------------------------------------------------------- */
+
+function HistoryUI({ history }) {
+  return (
+    <div style={historyWrapper}>
+      <h2 style={{ marginBottom: 20 }}>📚 Download History</h2>
+
+      {history.length === 0 && (
+        <div style={{ opacity: 0.5 }}>No downloads yet.</div>
+      )}
+
+      {history.map((item, idx) => (
+        <div key={idx} style={historyItem}>
+          <div style={{ fontWeight: "600" }}>{item.name}</div>
+
+          <div style={{ fontSize: 13, opacity: 0.8 }}>{item.filePath}</div>
+
+          <div style={{ fontSize: 12, opacity: 0.5, marginTop: 4 }}>
+            {new Date(item.timestamp).toLocaleString()}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------- */
+/*  DUPLICATE MODAL                                           */
+/* ---------------------------------------------------------- */
 
 function DuplicateModal({ dupModal, sendDecision }) {
   return (
     <div style={modalOverlay}>
       <div style={modalBox}>
         <h2 style={{ marginTop: 0 }}>
-          ⚠️ Duplicate File Detected
+          ⚠️ {dupModal.matchType === "filename" ? "Duplicate File" : "Similar File"}
         </h2>
 
         <p>
-          While downloading <b>{dupModal.name}</b>, an existing file was found.
+          A file matching{" "}
+          <b>
+            {dupModal.name}
+          </b>{" "}
+          already exists.
         </p>
 
         <p style={{ opacity: 0.8 }}>
-          Existing file:
+          Path:
           <br />
           <code style={{ fontSize: 13 }}>{dupModal.existingPath}</code>
         </p>
 
         {dupModal.score != null && (
           <p>
-            Similarity score: <b>{dupModal.score}%</b>
+            Similarity Score: <b>{dupModal.score}%</b>
           </p>
         )}
 
@@ -129,7 +223,7 @@ function DuplicateModal({ dupModal, sendDecision }) {
             Skip
           </button>
           <button style={btnBlue} onClick={() => sendDecision("rename")}>
-            Save as New
+            Save New
           </button>
           <button style={btnOrange} onClick={() => sendDecision("overwrite")}>
             Overwrite
@@ -140,22 +234,47 @@ function DuplicateModal({ dupModal, sendDecision }) {
   );
 }
 
-/* ----------------------------- STYLES ----------------------------- */
+/* ---------------------------------------------------------- */
+/*  STYLES (MODERN DESIGN)                                   */
+/* ---------------------------------------------------------- */
 
-const rootStyle = {
+const layout = {
+  display: "flex",
   width: "100vw",
   height: "100vh",
+  fontFamily: "Inter, sans-serif",
   background: "#0f1115",
-  display: "flex",
-  justifyContent: "center",
-  alignItems: "center",
-  padding: 20,
   color: "white",
 };
 
-const cardStyle = {
+const sidebar = {
+  width: 180,
+  padding: "20px 10px",
+  background: "rgba(255,255,255,0.04)",
+  borderRight: "1px solid rgba(255,255,255,0.08)",
+  display: "flex",
+  flexDirection: "column",
+  gap: 10,
+};
+
+const tab = (active) => ({
+  padding: "12px 16px",
+  borderRadius: 10,
+  cursor: "pointer",
+  fontWeight: 600,
+  background: active ? "rgba(59,130,246,0.2)" : "rgba(255,255,255,0.04)",
+  border: active ? "1px solid #3b82f6" : "1px solid transparent",
+});
+
+const content = {
+  flex: 1,
+  padding: 35,
+  overflowY: "auto",
+};
+
+const card = {
   width: "100%",
-  maxWidth: 700,
+  maxWidth: 650,
   padding: 40,
   borderRadius: 20,
   background: "rgba(255,255,255,0.05)",
@@ -163,20 +282,20 @@ const cardStyle = {
   boxShadow: "0 0 40px rgba(0,0,0,0.35)",
 };
 
-const titleStyle = {
+const title = {
   margin: 0,
   marginBottom: 20,
-  fontSize: 30,
-  fontWeight: "700",
+  fontSize: 28,
+  fontWeight: 700,
 };
 
-const inputRowStyle = {
+const inputRow = {
   display: "flex",
   gap: 10,
   marginBottom: 20,
 };
 
-const inputStyle = {
+const input = {
   flex: 1,
   padding: 14,
   fontSize: 16,
@@ -188,10 +307,9 @@ const inputStyle = {
 
 const statusBox = {
   padding: 16,
-  background: "rgba(255,255,255,0.06)",
-  borderRadius: 12,
-  color: "#d1d5db",
-  marginBottom: 12,
+  background: "rgba(255,255,255,0.07)",
+  borderRadius: 10,
+  marginBottom: 10,
 };
 
 const progressOuter = {
@@ -208,28 +326,43 @@ const progressInner = {
   transition: "width 0.2s",
 };
 
+const historyWrapper = {
+  maxWidth: 700,
+  margin: "0 auto",
+};
+
+const historyItem = {
+  background: "rgba(255,255,255,0.05)",
+  padding: 14,
+  borderRadius: 12,
+  marginBottom: 10,
+  border: "1px solid rgba(255,255,255,0.07)",
+};
+
 const modalOverlay = {
   position: "fixed",
   inset: 0,
-  background: "rgba(0,0,0,0.5)",
+  background: "rgba(0,0,0,0.55)",
   display: "flex",
   justifyContent: "center",
   alignItems: "center",
+  backdropFilter: "blur(4px)",
 };
 
 const modalBox = {
   width: 420,
   padding: 30,
-  background: "#1b1d22",
-  borderRadius: 16,
+  background: "rgba(27,29,34,0.95)",
+  borderRadius: 18,
   color: "white",
+  boxShadow: "0px 0px 25px rgba(0,0,0,0.35)",
 };
 
 const modalActions = {
   display: "flex",
   justifyContent: "flex-end",
-  gap: 10,
   marginTop: 20,
+  gap: 10,
 };
 
 const btnBlue = {
