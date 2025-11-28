@@ -21,8 +21,7 @@ contextBridge.exposeInMainWorld("dm", {
   onProgress(cb) {
     const listener = (_, data) => cb(data);
     ipcRenderer.on("download-progress", listener);
-    return () =>
-      ipcRenderer.removeListener("download-progress", listener);
+    return () => ipcRenderer.removeListener("download-progress", listener);
   },
 
   /* -------------------------------------------------- */
@@ -31,8 +30,7 @@ contextBridge.exposeInMainWorld("dm", {
   onDone(cb) {
     const listener = (_, data) => cb(data);
     ipcRenderer.on("download-done", listener);
-    return () =>
-      ipcRenderer.removeListener("download-done", listener);
+    return () => ipcRenderer.removeListener("download-done", listener);
   },
 
   /* -------------------------------------------------- */
@@ -41,8 +39,7 @@ contextBridge.exposeInMainWorld("dm", {
   onError(cb) {
     const listener = (_, data) => cb(data);
     ipcRenderer.on("download-error", listener);
-    return () =>
-      ipcRenderer.removeListener("download-error", listener);
+    return () => ipcRenderer.removeListener("download-error", listener);
   },
 
   /* -------------------------------------------------- */
@@ -63,7 +60,6 @@ contextBridge.exposeInMainWorld("dm", {
       console.warn("⚠ sendDecision called with NULL dupId – ignored.");
       return;
     }
-
     ipcRenderer.send(`download-decision-${dupId}`, payload);
   },
 
@@ -92,6 +88,13 @@ contextBridge.exposeInMainWorld("dm", {
   /* -------------------------------------------------- */
   getHistory() {
     return ipcRenderer.invoke("get-history");
+  },
+
+  /* -------------------------------------------------- */
+  /*  REQUEST DASHBOARD STATS                           */
+  /* -------------------------------------------------- */
+  getDashboardStats() {
+    return ipcRenderer.invoke("get-dashboard-stats");
   },
 
   /* -------------------------------------------------- */

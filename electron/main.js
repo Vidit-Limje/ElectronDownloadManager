@@ -2,7 +2,6 @@
 import { app, BrowserWindow, ipcMain, session } from "electron";
 import path from "path";
 import fs from "fs";
-import https from "https";
 import http from "http";
 import { fileURLToPath } from "url";
 
@@ -14,45 +13,13 @@ import {
   registerFileHashes,
 } from "./hasher.js";
 
+// NEW → import updated history system
+import { loadHistory, addHistoryEntry } from "./history.js";
+
 let mainWindow;
 
 const PENDING = new Map();
-const PRE_DECISIONS = new Map();
-
-// IMPORTANT: renamed save paths stored by dupId
 const NEXT_SAVE_PATH = new Map();
-
-// ---------- HISTORY SYSTEM ----------
-const HISTORY_PATH = path.join(app.getPath("userData"), "history.json");
-
-function loadHistory() {
-  try {
-    if (!fs.existsSync(HISTORY_PATH)) return [];
-    return JSON.parse(fs.readFileSync(HISTORY_PATH, "utf8"));
-  } catch {
-    return [];
-  }
-}
-
-function saveHistory(list) {
-  fs.writeFileSync(HISTORY_PATH, JSON.stringify(list, null, 2));
-}
-
-function addHistoryEntry(name, filePath) {
-  const list = loadHistory();
-
-  list.unshift({
-    name,
-    filePath,
-    timestamp: Date.now(),
-  });
-
-  saveHistory(list);
-
-  if (mainWindow) {
-    mainWindow.webContents.send("history-updated", list);
-  }
-}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -116,12 +83,13 @@ app.whenReady().then(() => {
   createWindow();
   setupIPCDownloadTrigger();
   setupHistoryHandlers();
+  setupDashboardHandlers(); // NEW
   setupDownloadManager();
-  setupPauseCancelHandlers();   // 🔥 ADDED
+  setupPauseCancelHandlers(); // NEW
 });
 
 /* ------------------------------------------------------- */
-/* HISTORY IPC HANDLERS                                     */
+/* HISTORY IPC HANDLERS (uses new history.js)              */
 /* ------------------------------------------------------- */
 function setupHistoryHandlers() {
   ipcMain.handle("get-history", async () => {
@@ -130,10 +98,35 @@ function setupHistoryHandlers() {
 }
 
 /* ------------------------------------------------------- */
+/* DASHBOARD STATISTICS IPC                                */
+/* ------------------------------------------------------- */
+function setupDashboardHandlers() {
+  ipcMain.handle("get-dashboard-stats", async () => {
+    const history = loadHistory();
+
+    let totalFiles = history.length;
+    let totalSize = 0;
+    let media = 0,
+      docs = 0,
+      others = 0;
+
+    history.forEach((h) => {
+      const size = h.size || 0;
+      totalSize += size;
+
+      if (h.category === "media") media += size;
+      else if (h.category === "documents") docs += size;
+      else others += size;
+    });
+
+    return { totalFiles, totalSize, media, docs, others };
+  });
+}
+
+/* ------------------------------------------------------- */
 /* PAUSE + CANCEL HANDLERS                                  */
 /* ------------------------------------------------------- */
 function setupPauseCancelHandlers() {
-  
   ipcMain.on("pause-download", (_, dupId) => {
     const entry = PENDING.get(dupId);
     if (entry?.item && !entry.item.isPaused()) {
@@ -157,7 +150,7 @@ function setupPauseCancelHandlers() {
       console.log("❌ Cancelled:", dupId);
 
       try {
-        fs.unlinkSync(entry.savePath); // remove partial file
+        fs.unlinkSync(entry.savePath);
       } catch {}
 
       PENDING.delete(dupId);
@@ -216,9 +209,9 @@ function setupDownloadManager() {
       checkedPartial: false,
     });
 
-    /* --------------------------------------------------- */
-    /* PROGRESS                                            */
-/* --------------------------------------------------- */
+    /* ----------------------------------------------- */
+    /* PROGRESS                                         */
+    /* ----------------------------------------------- */
     item.on("updated", async () => {
       const st = PENDING.get(dupId);
       if (!st) return;
@@ -228,14 +221,14 @@ function setupDownloadManager() {
       const percent = total ? ((received / total) * 100).toFixed(2) : "0";
 
       mainWindow?.webContents.send("download-progress", {
-        dupId,         // 🔥 ADDED
+        dupId,
         name: filename,
         received,
         total,
         percent,
       });
 
-      // partial duplicate check
+      // PARTIAL DUPLICATE CHECK
       if (!st.checkedPartial && received >= 1024 * 1024) {
         st.checkedPartial = true;
 
@@ -270,9 +263,9 @@ function setupDownloadManager() {
       }
     });
 
-    /* --------------------------------------------------- */
-    /* COMPLETE / FAIL                                     */
-/* --------------------------------------------------- */
+    /* ----------------------------------------------- */
+    /* COMPLETE / FAIL                                 */
+    /* ----------------------------------------------- */
     item.once("done", async (_, state) => {
       const finalPath = item.getSavePath();
 
@@ -283,6 +276,7 @@ function setupDownloadManager() {
           name: filename,
         });
 
+        // NEW: Add to history with category + size
         addHistoryEntry(filename, finalPath);
 
         setTimeout(() => {
@@ -299,7 +293,7 @@ function setupDownloadManager() {
 }
 
 /* ------------------------------------------------------- */
-/* DUP DECISION HANDLER DURING DOWNLOAD                    */
+/* DUP DECISION DURING DOWNLOAD                            */
 /* ------------------------------------------------------- */
 function waitForDecisionDuringDownload(dupId, item, savePath, filename, hit) {
   ipcMain.once(`download-decision-${dupId}`, (_, decision) => {

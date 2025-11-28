@@ -9,7 +9,9 @@ export default function App() {
   const [activeTab, setActiveTab] = useState("download");
   const [history, setHistory] = useState([]);
 
-  // >>> NEW
+  // NEW → Dashboard stats
+  const [stats, setStats] = useState(null);
+
   const [currentDupId, setCurrentDupId] = useState(null);
   const [isPaused, setIsPaused] = useState(false);
 
@@ -20,33 +22,36 @@ export default function App() {
     const unsubProgress = window.dm?.onProgress((p) => {
       setProgress(Number(p.percent));
       setStatus(`Downloading ${p.name} – ${Number(p.percent).toFixed(2)}%`);
-      setCurrentDupId(p.dupId || null); // >>> NEW
+      setCurrentDupId(p.dupId || null);
     });
 
     const unsubDone = window.dm?.onDone((d) => {
       setStatus(`✔ Download complete: ${d.name}`);
       setProgress(0);
-      setCurrentDupId(null); // >>> NEW
-      setIsPaused(false); // >>> NEW
+      setCurrentDupId(null);
+      setIsPaused(false);
+      refreshDashboard(); // UPDATE STATS
     });
 
     const unsubError = window.dm?.onError(() => {
       setStatus(`❌ Download error`);
       setProgress(0);
-      setCurrentDupId(null); // >>> NEW
+      setCurrentDupId(null);
       setIsPaused(false);
     });
 
     const unsubDup = window.dm?.onDuplicate((data) => {
       setDupModal(data);
-      setCurrentDupId(data.dupId || null); // >>> NEW
+      setCurrentDupId(data.dupId || null);
     });
 
     const unsubHistory = window.dm?.onHistory((list) => {
       setHistory(list);
+      refreshDashboard();
     });
 
     window.dm?.getHistory().then((list) => setHistory(list || []));
+    refreshDashboard();
 
     return () => {
       unsubProgress?.();
@@ -56,6 +61,13 @@ export default function App() {
       unsubHistory?.();
     };
   }, []);
+
+  /* -------------------------------------------------- */
+  /*  LOAD DASHBOARD STATS                              */
+  /* -------------------------------------------------- */
+  const refreshDashboard = () => {
+    window.dm?.getDashboardStats().then((s) => setStats(s));
+  };
 
   /* -------------------------------------------------- */
   /*  HANDLERS                                          */
@@ -82,7 +94,6 @@ export default function App() {
     if (action === "rename") setStatus("Saving file as new...");
   };
 
-  // >>> NEW: Pause / Resume / Cancel controls
   const pauseDownload = () => {
     if (!currentDupId) return;
     window.dm.pause(currentDupId);
@@ -125,6 +136,13 @@ export default function App() {
         >
           📚 History
         </div>
+
+        <div
+          style={tab(activeTab === "dashboard")}
+          onClick={() => setActiveTab("dashboard")}
+        >
+          📊 Dashboard
+        </div>
       </div>
 
       {/* MAIN CONTENT */}
@@ -136,15 +154,17 @@ export default function App() {
             startDownload={startDownload}
             status={status}
             progress={progress}
-            dupId={currentDupId}        // >>> NEW
-            isPaused={isPaused}         // >>> NEW
-            pause={pauseDownload}       // >>> NEW
-            resume={resumeDownload}     // >>> NEW
-            cancel={cancelDownload}     // >>> NEW
+            dupId={currentDupId}
+            isPaused={isPaused}
+            pause={pauseDownload}
+            resume={resumeDownload}
+            cancel={cancelDownload}
           />
         )}
 
         {activeTab === "history" && <HistoryUI history={history} />}
+
+        {activeTab === "dashboard" && <Dashboard stats={stats} />}
       </div>
 
       {dupModal && (
@@ -155,10 +175,80 @@ export default function App() {
 }
 
 /* ---------------------------------------------------------- */
+/*  DASHBOARD UI                                              */
+/* ---------------------------------------------------------- */
+function Dashboard({ stats }) {
+  if (!stats)
+    return <div style={{ opacity: 0.5 }}>Loading dashboard...</div>;
+
+  const format = (n) =>
+    (n / (1024 * 1024)).toFixed(2) + " MB";
+
+  return (
+    <div style={card}>
+      <h1 style={title}>📊 Download Dashboard</h1>
+
+      <div style={{ display: "flex", gap: 20, marginBottom: 30 }}>
+        <div style={dashCard}>
+          <div style={dashLabel}>Total Downloads</div>
+          <div style={dashValue}>{stats.totalFiles}</div>
+        </div>
+
+        <div style={dashCard}>
+          <div style={dashLabel}>Total Size</div>
+          <div style={dashValue}>{format(stats.totalSize)}</div>
+        </div>
+      </div>
+
+      <h3 style={{ marginBottom: 15 }}>By Category</h3>
+
+      <div style={{ display: "flex", gap: 20 }}>
+        <div style={dashCard}>
+          <div style={dashLabel}>🎬 Media</div>
+          <div style={dashValue}>{format(stats.media)}</div>
+        </div>
+
+        <div style={dashCard}>
+          <div style={dashLabel}>📄 Documents</div>
+          <div style={dashValue}>{format(stats.docs)}</div>
+        </div>
+
+        <div style={dashCard}>
+          <div style={dashLabel}>📦 Others</div>
+          <div style={dashValue}>{format(stats.others)}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const dashCard = {
+  flex: 1,
+  background: "rgba(255,255,255,0.05)",
+  padding: 20,
+  borderRadius: 12,
+  border: "1px solid rgba(255,255,255,0.1)",
+};
+
+const dashLabel = { fontSize: 14, opacity: 0.7, marginBottom: 6 };
+const dashValue = { fontSize: 22, fontWeight: "bold" };
+
+/* ---------------------------------------------------------- */
 /*  DOWNLOAD PAGE UI                                          */
 /* ---------------------------------------------------------- */
 
-function DownloadUI({ url, setUrl, startDownload, status, progress, dupId, isPaused, pause, resume, cancel }) {
+function DownloadUI({
+  url,
+  setUrl,
+  startDownload,
+  status,
+  progress,
+  dupId,
+  isPaused,
+  pause,
+  resume,
+  cancel,
+}) {
   return (
     <div style={card}>
       <h1 style={title}>⚡ Smart Duplicate-Aware Downloader</h1>
@@ -188,7 +278,6 @@ function DownloadUI({ url, setUrl, startDownload, status, progress, dupId, isPau
             </div>
           </div>
 
-          {/* >>> NEW: Pause/Resume/Cancel buttons */}
           <div style={{ marginTop: 12, display: "flex", gap: 10 }}>
             {!isPaused && (
               <button style={btnOrange} onClick={pause}>
@@ -211,7 +300,7 @@ function DownloadUI({ url, setUrl, startDownload, status, progress, dupId, isPau
 }
 
 /* ---------------------------------------------------------- */
-/*  HISTORY + MODAL (unchanged)                              */
+/*  HISTORY UI                                                */
 /* ---------------------------------------------------------- */
 
 function HistoryUI({ history }) {
@@ -228,6 +317,14 @@ function HistoryUI({ history }) {
           <div style={{ fontWeight: "600" }}>{item.name}</div>
 
           <div style={{ fontSize: 13, opacity: 0.8 }}>{item.filePath}</div>
+
+          <div style={{ fontSize: 13, marginTop: 4 }}>
+            Size: {(item.size / 1024 / 1024).toFixed(2)} MB
+          </div>
+
+          <div style={{ fontSize: 13 }}>
+            Category: {item.category}
+          </div>
 
           <div style={{ fontSize: 12, opacity: 0.5, marginTop: 4 }}>
             {new Date(item.timestamp).toLocaleString()}
@@ -247,7 +344,10 @@ function DuplicateModal({ dupModal, sendDecision }) {
     <div style={modalOverlay}>
       <div style={modalBox}>
         <h2 style={{ marginTop: 0 }}>
-          ⚠️ {dupModal.matchType === "filename" ? "Duplicate File" : "Similar File"}
+          ⚠️{" "}
+          {dupModal.matchType === "filename"
+            ? "Duplicate File"
+            : "Similar File"}
         </h2>
 
         <p>
@@ -328,6 +428,10 @@ const card = {
   background: "rgba(255,255,255,0.05)",
   border: "1px solid rgba(255,255,255,0.1)",
   boxShadow: "0 0 40px rgba(0,0,0,0.35)",
+};
+
+const dashStyle = {
+  fontSize: 40,
 };
 
 const title = {
